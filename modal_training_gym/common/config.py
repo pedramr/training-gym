@@ -182,7 +182,15 @@ def modal_proxy_auth_headers() -> dict[str, str]:
 
 
 def get_framework_status_url() -> str | None:
-    """Return the saved framework-status endpoint URL, or ``None``."""
+    """Return the framework-status endpoint URL, or ``None``.
+
+    ``TRAINING_GYM_FRAMEWORK_STATUS_URL`` overrides the saved dashboard URL when
+    set -- the same env var the worker-side reporters already read -- so status
+    reports can be routed to an alternate endpoint without redeploying the
+    dashboard."""
+    override = os.environ.get("TRAINING_GYM_FRAMEWORK_STATUS_URL", "").strip()
+    if override:
+        return override
     base = get_dashboard_url()
     if not base:
         return None
