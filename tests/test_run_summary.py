@@ -199,8 +199,9 @@ def test_config_summary_fallbacks_and_wandb_defaults():
     assert summary.gpu_type == "H100"
     assert summary.lr == 0
     assert summary.global_batch_size == 0
-    assert summary.wandb_training_run_id == "abcdefgh"
-    assert summary.wandb_url == "https://wandb.ai/entity/project/runs/abcdefgh"
+    # The whole training run id, not a mid-word 8-char slice of it.
+    assert summary.wandb_training_run_id == "abcdefghijk"
+    assert summary.wandb_url == "https://wandb.ai/entity/project/runs/abcdefghijk"
     assert run_summary_module._config_summary(None, "run-id") == {}
 
 
@@ -672,3 +673,25 @@ def test_an_attempt_link_carries_a_normalized_run_id(monkeypatch, recorded, expe
         "https://metrics.example.com/?project=training"
     ]
     assert links[0].run_id == expected
+
+
+def test_the_tracker_run_id_is_the_whole_training_run_id():
+    """It used to be training_run_id[:8], which cuts the generated name mid-word
+    ("accepting-leave-2066a9f5" -> "acceptin") and reads as noise in a run list."""
+    from modal_training_gym.common.run import wandb_run_id_for_attempt
+
+    assert wandb_run_id_for_attempt("accepting-leave-2066a9f5", 1) == (
+        "accepting-leave-2066a9f5"
+    )
+    assert wandb_run_id_for_attempt("accepting-leave-2066a9f5", 3) == (
+        "accepting-leave-2066a9f5-a3"
+    )
+
+    run = _run()
+    run["config"]["wandb"] = {"entity": "e", "project": "p"}
+    run["metadata"].pop("wandb_attempts")
+
+    summary = build_run_summary(run, None)
+
+    assert summary.config_summary.wandb_training_run_id == "run-1"
+    assert summary.config_summary.wandb_url == "https://wandb.ai/e/p/runs/run-1"

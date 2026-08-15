@@ -412,8 +412,17 @@ def record_resume_checkpoint(
 
 
 def wandb_run_id_for_attempt(training_run_id: str, attempt_count: int) -> str:
-    base_run_id = training_run_id[:8]
-    return base_run_id if attempt_count <= 1 else f"{base_run_id}-a{attempt_count}"
+    """The tracker run id for an attempt: the training run's own id.
+
+    This used to be ``training_run_id[:8]``, which cuts the generated name mid
+    word ("accepting-leave-2066a9f5" -> "acceptin"), so a tracker's run list read
+    as a column of unrelated fragments and two runs sharing a first word were
+    indistinguishable. The training run id is already unique and human-readable,
+    which is the whole point of naming runs.
+    """
+    return (
+        training_run_id if attempt_count <= 1 else f"{training_run_id}-a{attempt_count}"
+    )
 
 
 def record_wandb_attempt(

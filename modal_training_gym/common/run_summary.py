@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, ValidationError
 from pydantic.fields import FieldInfo
 
 from modal_training_gym.common.modal_urls import modal_app_dashboard_url
+from modal_training_gym.common.run import wandb_run_id_for_attempt
 from modal_training_gym.common.tracker import tracker_config
 
 
@@ -353,7 +354,9 @@ def _config_summary(config: object, training_run_id: str) -> ConfigSummary | Jso
     # a project rather than an entity keeps backends whose URLs have no notion
     # of an entity working.)
     wandb_run_id = _identifier(wandb.get("run_id")) or (
-        training_run_id[:8] if _identifier(wandb.get("project")) else ""
+        wandb_run_id_for_attempt(training_run_id, 1)
+        if _identifier(wandb.get("project"))
+        else ""
     )
     return ConfigSummary(
         model_name=_text(model.get("model_name")),
