@@ -1,8 +1,10 @@
 """Self-contained training-gym dashboard app.
 
 When deployed from a pip install (no local repo checkout), the image build
-clones the frontend source from GitHub. When running from a repo checkout,
-it uses the local ``dashboards/frontend`` directory instead.
+clones the frontend source from GitHub -- ``main`` by default, or the repo and
+ref named by ``TRAINING_GYM_FRONTEND_REPO_URL`` / ``TRAINING_GYM_FRONTEND_REF``.
+When running from a repo checkout, it uses the local ``dashboards/frontend``
+directory instead.
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ import asyncio
 import os
 import re
 import secrets as _secrets
+import shlex
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Awaitable, Callable, Iterable, TypedDict
@@ -65,11 +68,43 @@ class LogEntry(TypedDict):
     ts_ns: int | None
 
 
-REPO_URL = "https://github.com/modal-projects/training-gym.git"
-REPO_BRANCH = "main"
+DEFAULT_REPO_URL = "https://github.com/modal-projects/training-gym.git"
+DEFAULT_REPO_REF = "main"
+
+REPO_URL_ENV = "TRAINING_GYM_FRONTEND_REPO_URL"
+REPO_REF_ENV = "TRAINING_GYM_FRONTEND_REF"
+
+# Conservative, because both end up in a shell command in the image build.
+# Anything outside these sets is a typo far more often than it is a real repo
+# or ref, and a leading "-" would be read by git as an option.
+_SAFE_REPO_URL = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9+._~:/@-]*\Z")
+_SAFE_REPO_REF = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._/-]*\Z")
 
 _repo_frontend = Path(__file__).resolve().parents[1] / "dashboards" / "frontend"
 _has_local_frontend = _repo_frontend.is_dir()
+
+
+def _frontend_source() -> tuple[str, str]:
+    """The (repo, ref) the frontend is built from when there's no local checkout.
+
+    A pip or uv install pins only the Python side; the dashboard image builds
+    the frontend from whatever is on ``main`` at build time. Overriding the ref
+    lets a deployment pin the frontend to the same revision as the installed
+    package, and overriding the repo lets a fork build its own.
+
+    Read at deploy time, since it only affects the image build. Rejects values
+    outright rather than sanitising them — this is deploy configuration, so
+    failing loudly beats silently building someone else's frontend.
+    """
+    url = os.environ.get(REPO_URL_ENV, "").strip() or DEFAULT_REPO_URL
+    ref = os.environ.get(REPO_REF_ENV, "").strip() or DEFAULT_REPO_REF
+    for value, pattern, env_name in (
+        (url, _SAFE_REPO_URL, REPO_URL_ENV),
+        (ref, _SAFE_REPO_REF, REPO_REF_ENV),
+    ):
+        if not pattern.fullmatch(value):
+            raise ValueError(f"{env_name}={value!r} is not a valid git repo/ref")
+    return url, ref
 
 
 def _build_image() -> modal.Image:
@@ -91,8 +126,14 @@ def _build_image() -> modal.Image:
             ignore=["node_modules", "dist"],
         )
     else:
+        repo_url, repo_ref = _frontend_source()
+        # init + fetch rather than `clone -b`, which takes only a branch or a
+        # tag; this form also accepts a commit sha, so the ref can be exact.
         base = base.apt_install("git").run_commands(
-            f"git clone --depth 1 -b {REPO_BRANCH} {REPO_URL} /tmp/training-gym",
+            "git init /tmp/training-gym",
+            f"git -C /tmp/training-gym remote add origin {shlex.quote(repo_url)}",
+            f"git -C /tmp/training-gym fetch --depth 1 origin {shlex.quote(repo_ref)}",
+            "git -C /tmp/training-gym checkout --detach FETCH_HEAD",
             "mkdir -p /app && cp -r /tmp/training-gym/dashboards/frontend /app/frontend",
             "rm -rf /tmp/training-gym",
         )
@@ -117,6 +158,12 @@ MODAL_CREDS_SECRET_NAME = "_training-gym-modal-creds"
 # auth) — that's the default so existing deployments keep working untouched.
 # Set a real value via ``training-gym set-password``.
 DASHBOARD_PASSWORD_SECRET_NAME = "_training-gym-dashboard-password"
+
+# Optional, operator-created (hence no underscore prefix: nothing auto-manages
+# it). Holds TRAINING_GYM_TRACKER_LABEL / _RUN_URL_TEMPLATE /
+# _PROJECT_URL_TEMPLATE, which point each run's metric link at a tracker other
+# than wandb.ai — see modal_training_gym.common.tracker and dashboards/README.md.
+TRACKER_SECRET_NAME = "training-gym-tracker"
 
 # Write endpoints authenticated by their own per-run bearer token. They're
 # exempt from Basic Auth so launchers (which send ``Authorization: Bearer``)
@@ -265,14 +312,14 @@ def ensure_creds_secret(interactive: bool = False) -> bool:
         return False
 
 
-def _password_secret_exists() -> bool:
-    """True if the operator has configured a dashboard password Secret.
+def _secret_exists(name: str) -> bool:
+    """True if a Secret by this name is configured in the environment.
 
-    Checked at deploy time (local) to decide whether to mount the Secret on
-    the ASGI function — if it was never created, the dashboard stays open.
+    Checked at deploy time (local) to decide whether to mount an optional
+    Secret on the ASGI function.
     """
     try:
-        modal.Secret.from_name(DASHBOARD_PASSWORD_SECRET_NAME).hydrate()
+        modal.Secret.from_name(name).hydrate()
         return True
     except Exception:
         return False
@@ -281,12 +328,14 @@ def _password_secret_exists() -> bool:
 def _function_secrets() -> list[modal.Secret]:
     """Secrets mounted on the ASGI function.
 
-    The password Secret is optional and mounted only when it exists; absent
-    it, ``DASHBOARD_PASSWORD`` is never injected and the dashboard is open.
+    Both optional Secrets are mounted only when they exist: absent the
+    password one, ``DASHBOARD_PASSWORD`` is never injected and the dashboard
+    is open; absent the tracker one, metric links point at wandb.ai.
     """
     secrets = [modal.Secret.from_name(MODAL_CREDS_SECRET_NAME)]
-    if _password_secret_exists():
-        secrets.append(modal.Secret.from_name(DASHBOARD_PASSWORD_SECRET_NAME))
+    for optional in (DASHBOARD_PASSWORD_SECRET_NAME, TRACKER_SECRET_NAME):
+        if _secret_exists(optional):
+            secrets.append(modal.Secret.from_name(optional))
     return secrets
 
 

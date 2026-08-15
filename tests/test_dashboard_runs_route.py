@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from modal_training_gym import _dashboard
+from modal_training_gym.common import tracker
 from modal_training_gym.common.framework import Framework
 from modal_training_gym.common.run import TrainingRun
 from modal_training_gym.common.train_result import TrainResult
@@ -261,3 +262,28 @@ def test_run_logs_rejects_invalid_time_bound(bound, fake_volume, monkeypatch, tm
     assert response.json()["detail"].startswith(
         f"{bound} must be epoch seconds, ISO 8601, or a relative time"
     )
+
+
+@pytest.mark.parametrize("path", ["/api/runs", "/api/runs/run-route-1"])
+def test_a_malformed_tracker_template_cannot_break_the_run_routes(
+    path, fake_volume, monkeypatch, tmp_path
+):
+    """Both routes turn an exception during summary construction into an error
+    or an empty list, so a typo in one env var could otherwise blank the whole
+    dashboard. The bad template must cost only its own link."""
+    monkeypatch.setenv(
+        tracker.RUN_URL_TEMPLATE_ENV, "https://metrics.example.com/{project!r}"
+    )
+    tracker.tracker_config.cache_clear()
+    _save_records()
+
+    try:
+        with _client(monkeypatch, tmp_path) as client:
+            response = client.get(path)
+    finally:
+        tracker.tracker_config.cache_clear()
+
+    assert response.status_code == 200
+    summary = response.json()[0] if path == "/api/runs" else response.json()
+    assert summary["training_run_id"] == "run-route-1"
+    assert summary["wandb_links"] == []
